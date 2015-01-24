@@ -4,7 +4,7 @@ use warnings;
 use strict;
 use HTTP::Request::Common;
 use LWP::UserAgent;
-use JSON;
+use XML::Simple;
 use Nagios::Plugin;
 use Data::Dumper;
 
@@ -20,15 +20,15 @@ my $np = Nagios::Plugin->new(
     . "[ --ignoressl ] "
     . "[ -h|--help ] ",
     version => '0.5',
-    blurb   => 'Nagios plugin to check JSON attributes via http(s)',
+    blurb   => 'Nagios plugin to check XML attributes via http(s)',
     extra   => "\nExample: \n"
-    . "check_json.pl --url http://192.168.5.10:9332/local_stats --attributes '{shares}->{dead}' "
-    . "--warning :5 --critical :10 --perfvars '{shares}->{dead},{shares}->{live}' "
+    . "check_http_xml.pl --url http://192.168.5.10:9332/local_stats --attributes '{shares}->{dead}' "
+    . "--warning :5 --critical :10 --perfvars '{shares}->{dead},{shares}->{live},{total},{ping}->{\"ns2:elapsedMs\"}' "
     . "--outputvars '{status_message}'",
     url     => 'https://github.com/c-kr/check_json',
-    plugin  => 'check_json',
+    plugin  => 'check_http_xml',
     timeout => 15,
-    shortname => "Check JSON status API",
+    shortname => "Check XML status API",
 );
 
  # add valid command line options and build them into your usage/help documentation.
@@ -65,8 +65,8 @@ $np->add_arg(
 
 $np->add_arg(
     spec => 'perfvars|p=s',
-    help => "-p, --perfvars eg. '* or {shares}->{dead},{shares}->{live}'\n   "
-    . "CSV list of fields from JSON response to include in perfdata "
+    help => "-p, --perfvars eg. '* or {shares}->{dead},{shares}->{live},{total},{ping}->{\"ns2:elapsedMs\"}'\n   "
+    . "CSV list of fields from XML response to include in perfdata "
 );
 
 $np->add_arg(
@@ -78,14 +78,14 @@ $np->add_arg(
 $np->add_arg(
     spec => 'metadata|m=s',
     help => "-m|--metadata \'{\"name\":\"value\"}\'\n   "
-    . "RESTful request metadata in JSON format"
+    . "RESTful request metadata in XML format"
 );
 
 $np->add_arg(
     spec => 'contenttype|T=s',
-    default => 'application/json',
-    help => "-T, --contenttype application/json \n   "
-    . "Content-type accepted if different from application/json ",
+    default => 'application/xml',
+    help => "-T, --contenttype application/xml \n   "
+    . "Content-type accepted if different from application/xml ",
 );
 
 $np->add_arg(
@@ -100,8 +100,8 @@ if ($np->opts->verbose) { (print Dumper ($np))};
 ## GET URL
 my $ua = LWP::UserAgent->new;
 
-$ua->agent('check_json/0.5');
-$ua->default_header('Accept' => 'application/json');
+$ua->agent('check_http_xml/0.5');
+$ua->default_header('Accept' => 'application/xml');
 $ua->protocols_allowed( [ 'http', 'https'] );
 $ua->parse_head(0);
 $ua->timeout($np->opts->timeout);
@@ -114,22 +114,22 @@ if ($np->opts->verbose) { (print Dumper ($ua))};
 
 my $response;
 if ($np->opts->metadata) {
-    $response = $ua->request(GET $np->opts->url, 'Content-type' => 'application/json', 'Content' => $np->opts->metadata );
+    $response = $ua->request(GET $np->opts->url, 'Content-type' => 'application/xml', 'Content' => $np->opts->metadata );
 } else {
     $response = $ua->request(GET $np->opts->url);
 }
 
 if ($response->is_success) {
     if (!($response->header("content-type") =~ $np->opts->contenttype)) {
-        $np->nagios_exit(UNKNOWN,"Content type is not JSON: ".$response->header("content-type"));
+        $np->nagios_exit(UNKNOWN,"Content type is not XML: ".$response->header("content-type"));
     }
 } else {
     $np->nagios_exit(CRITICAL, "Connection failed: ".$response->status_line);
 }
 
-## Parse JSON
-my $json_response = decode_json($response->content);
-if ($np->opts->verbose) { (print Dumper ($json_response))};
+## Parse XML
+my $xml_response = XMLin($response->content);
+if ($np->opts->verbose) { (print Dumper ($xml_response))};
 
 my @attributes = split(',', $np->opts->attributes);
 my @warning = split(',', $np->opts->warning);
@@ -143,7 +143,7 @@ my $result = -1;
 
 foreach my $attribute (sort keys %attributes){
     my $check_value;
-    my $check_value_str = '$check_value = $json_response->'.$attribute;
+    my $check_value_str = '$check_value = $xml_response->'.$attribute;
     
     if ($np->opts->verbose) { (print Dumper ($check_value_str))};
     eval $check_value_str;
@@ -169,16 +169,16 @@ foreach my $attribute (sort keys %attributes){
 my @statusmsg;
 
 
-# routine to add perfdata from JSON response based on a loop of keys given in perfvals (csv)
+# routine to add perfdata from XML response based on a loop of keys given in perfvals (csv)
 if ($np->opts->perfvars) {
-    foreach my $key ($np->opts->perfvars eq '*' ? map { "{$_}"} sort keys %$json_response : split(',', $np->opts->perfvars)) {
+    foreach my $key ($np->opts->perfvars eq '*' ? map { "{$_}"} sort keys %$xml_response : split(',', $np->opts->perfvars)) {
         # use last element of key as label
         my $label = (split('->', $key))[-1];
         # make label ascii compatible
         $label =~ s/[^a-zA-Z0-9_-]//g  ;
         my $perf_value;
-        $perf_value = eval '$json_response->'.$key;
-        if ($np->opts->verbose) { print Dumper ("JSON key: ".$label.", JSON val: " . $perf_value) };
+        $perf_value = eval '$xml_response->'.$key;
+        if ($np->opts->verbose) { print Dumper ("XML key: $key|".$label.", XML val: " . $perf_value) };
         if ( defined($perf_value) ) {
             # add threshold if attribute option matches key
             if ($attributes{$key}) {
@@ -201,14 +201,14 @@ if ($np->opts->perfvars) {
 
 # output some vars in message
 if ($np->opts->outputvars) {
-    foreach my $key ($np->opts->outputvars eq '*' ? map { "{$_}"} sort keys %$json_response : split(',', $np->opts->outputvars)) {
+    foreach my $key ($np->opts->outputvars eq '*' ? map { "{$_}"} sort keys %$xml_response : split(',', $np->opts->outputvars)) {
         # use last element of key as label
         my $label = (split('->', $key))[-1];
         # make label ascii compatible
         $label =~ s/[^a-zA-Z0-9_-]//g;
         my $perf_value;
-        $perf_value = eval '$json_response->'.$key;
-	   push(@statusmsg, "$label: $perf_value");
+        $perf_value = eval '$xml_response->'.$key;
+	push(@statusmsg, "$label: $perf_value");
     }
 }
 
